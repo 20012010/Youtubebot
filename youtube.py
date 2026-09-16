@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import time
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,30 +14,39 @@ from telegram.ext import (
 )
 import yt_dlp
 
+# Logging sozlamalari
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
 # ==================== SOZLAMALAR ====================
-BOT_TOKEN = "8772772179:AAF-3UXZvTwvaUdi6dSh1JYBkgr4Y4hjS00"  # Bot tokeningiz
-ADMIN_ID = 5767188230                # Telegram ID
-CHANNEL_ID = "@YoutubeeDownload"     # Majburiy obuna kanali
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8772772179:AAF-3UXZvTwvaUdi6dSh1JYBkgr4Y4hjS00")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 5767188230))
+CHANNEL_ID = "@YoutubeeDownload"
 CHANNEL_URL = "https://t.me/YoutubeeDownload"
 
 USERS_FILE = "users.json"
 # ====================================================
 
+lock = asyncio.Lock()
+
 def load_users():
     if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r") as f:
-            try:
+        try:
+            with open(USERS_FILE, "r") as f:
                 return json.load(f)
-            except json.JSONDecodeError:
-                return []
+        except (json.JSONDecodeError, OSError):
+            return []
     return []
 
-def save_user(user_id):
-    users = load_users()
-    if user_id not in users:
-        users.append(user_id)
-        with open(USERS_FILE, "w") as f:
-            json.dump(users, f)
+async def save_user(user_id):
+    async with lock:
+        users = load_users()
+        if user_id not in users:
+            users.append(user_id)
+            with open(USERS_FILE, "w") as f:
+                json.dump(users, f, indent=2)
 
 async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -61,7 +71,7 @@ def get_admin_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    save_user(user_id)
+    await save_user(user_id)
 
     if not await check_subscription(user_id, context):
         await update.message.reply_text(
@@ -74,20 +84,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
-        await update.message.reply_text("⚙️ **Admin Panel**", reply_markup=get_admin_keyboard())
+        await update.message.reply_text("⚙️ **Admin Panel**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
 
 def get_video_info(url):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        # YouTube bot deb o'ylamasligi va bloklamasligi uchun mobil mijoz simulyatsiyasi
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios']
+            }
+        }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(url, download=False)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    save_user(user_id)
+    await save_user(user_id)
 
     if not await check_subscription(user_id, context):
         await update.message.reply_text("⚠️ Botdan foydalanish uchun kanalga obuna bo'ling:", reply_markup=get_sub_keyboard())
@@ -106,10 +121,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(0.05)
             except Exception:
                 failed += 1
-        await status_msg.edit_text(f"✅ **Xabar yuborildi!**\n\nYetib bordi: {success} ta\nXatolik: {failed} ta")
+        await status_msg.edit_text(f"✅ **Xabar yuborildi!**\n\nYetib bordi: {success} ta\nXatolik: {failed} ta", parse_mode="Markdown")
         return
 
-    url = update.message.text
+    url = update.message.text.strip()
     if not url or ("youtube.com" not in url and "youtu.be" not in url):
         await update.message.reply_text("Iltimos, to'g'ri YouTube havolasini yuboring.")
         return
@@ -199,7 +214,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_stats":
         if user_id == ADMIN_ID:
             users = load_users()
-            await query.message.reply_text(f"📊 **Bot statistikasi:**\n\nJami foydalanuvchilar: {len(users)} ta")
+            await query.message.reply_text(f"📊 **Bot statistikasi:**\n\nJami foydalanuvchilar: {len(users)} ta", parse_mode="Markdown")
         return
 
     elif data == "admin_broadcast":
@@ -223,7 +238,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         msg = await query.message.reply_text("⏳ Yuklash boshlanmoqda...")
-        out_file = f"file_{query.message.message_id}"
+        out_file = f"file_{query.message.message_id}_{user_id}"
 
         main_loop = asyncio.get_running_loop()
         last_update_time = [time.time()]
@@ -250,44 +265,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         text = "📥 **Yuklanmoqda...**"
                     
-                    asyncio.run_coroutine_threadsafe(
-                        msg.edit_text(text, parse_mode="Markdown"),
-                        main_loop
-                    )
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            msg.edit_text(text, parse_mode="Markdown"),
+                            main_loop
+                        )
+                    except Exception:
+                        pass
 
-        if media_type == "mp3":
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': f"{out_file}.%(ext)s",
-                'progress_hooks': [progress_hook],
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'quiet': True,
-            }
-            final_file = f"{out_file}.mp3"
-        else:
-            ydl_opts = {
-                'format': f'bestvideo[height<={opt}][ext=mp4]+bestaudio[ext=m4a]/best[height<={opt}][ext=mp4]/best',
-                'outtmpl': f"{out_file}.mp4",
-                'progress_hooks': [progress_hook],
-                'quiet': True,
-            }
-            final_file = f"{out_file}.mp4"
-
+        final_file = None
         try:
+            if media_type == "mp3":
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'outtmpl': f"{out_file}.%(ext)s",
+                    'progress_hooks': [progress_hook],
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
+                    'quiet': True,
+                    'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+                }
+                final_file = f"{out_file}.mp3"
+            else:
+                ydl_opts = {
+                    'format': f'bestvideo[height<={opt}][ext=mp4]+bestaudio[ext=m4a]/best[height<={opt}][ext=mp4]/best',
+                    'outtmpl': f"{out_file}.mp4",
+                    'progress_hooks': [progress_hook],
+                    'quiet': True,
+                    'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+                }
+                final_file = f"{out_file}.mp4"
+
             def extract():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
+
             await main_loop.run_in_executor(None, extract)
 
             if os.path.exists(final_file):
                 file_size_mb = os.path.getsize(final_file) / (1024 * 1024)
                 if file_size_mb > 50:
                     await msg.edit_text(f"❌ Fayl hajmi juda katta ({file_size_mb:.1f} MB). Telegram botlar 50 MB dan katta fayllarni yubora olmaydi.")
-                    os.remove(final_file)
                     return
 
                 await msg.edit_text("📤 Telegram'ga yuklanmoqda...")
@@ -317,7 +338,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await msg.edit_text(f"❌ Xatolik yuz berdi: {str(e)}")
         finally:
-            if os.path.exists(final_file):
+            if final_file and os.path.exists(final_file):
                 os.remove(final_file)
 
 def main():
